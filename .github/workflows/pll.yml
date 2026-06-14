@@ -1,0 +1,35 @@
+name: Pel Server Auto Renew
+
+on:
+ # schedule:
+    # 每小时的第 0 分钟运行一次 (UTC时间)
+  #  - cron: '0 * * * *'
+  workflow_dispatch: # 允许在 GitHub 界面手动触发执行
+
+jobs:
+  run-automation:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests playwright
+        # 安装 Playwright 浏览器内核及其系统依赖
+        playwright install chromium --with-deps
+
+    - name: Run Auto Renew Script
+      env:
+        PELLA_EMAIL: ${{ secrets.PELLA_EMAIL }}
+        PELLA_PASSWORD: ${{ secrets.PELLA_PASSWORD }}
+        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+      run: python main.py
