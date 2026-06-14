@@ -57,7 +57,6 @@ def run():
             nonlocal jwt_token
             auth_header = request.headers.get("authorization")
             if auth_header and auth_header.startswith("Bearer ") and len(auth_header) > 20:
-                # 排除可能存在的、还未初始化完全的旧 token
                 jwt_token = auth_header
 
         page.on("request", handle_request)
@@ -75,41 +74,48 @@ def run():
         print("点击登录按钮...")
         page.click('button[data-localization-key="formButtonPrimary"]')
         
-        # 登录后通常会跳转到仪表盘（dashboard），我们等待页面加载，同时给网络请求一点时间触发
-        print("等待登录完成及跳转...")
-        page.wait_for_url("**/dashboard", timeout=20000)
-        page.wait_for_timeout(5000) 
+        # 【核心改动】：完全不看页面跳转，直接等带有 Clerk 认证或 API 特征的网络请求发出
+        print("正在等待网络身份令牌(Token)生成...")
+        try:
+            # 只要有任何向 cl_ 或 pella.app 发出的带 auth 的请求即可触发，最多等 15 秒
+            page.wait_for_event(
+                "request", 
+                lambda req: req.headers.get("authorization") is not None and "Bearer" in req.headers.get("authorization"), 
+                timeout=15000
+            )
+        except Exception:
+            print("通过事件未精准截获到 Token，使用缓冲时间并尝试 JS 兜底提取...")
+            page.wait_for_timeout(5000)
 
-        # 如果通过网络监听没拿到 Token，尝试通过 Clerk 前端对象的 JS 接口直接提取
+        # 兜底：如果事件没触发，直接通过前端全局对象提取
         if not jwt_token:
-            print("尝试通过前端 JS 提取 Clerk Token...")
             try:
                 jwt_token = page.evaluate("window.Clerk?.session?.getToken()")
                 if jwt_token and not jwt_token.startswith("Bearer "):
                     jwt_token = f"Bearer {jwt_token}"
-            except Exception as e:
-                print(f"JS 提取 Token 失败: {e}")
+            except Exception:
+                pass
 
         if not jwt_token:
-            msg = "❌ 错误: 登录成功但无法获取到身份认证的 Authorization Token！"
+            msg = "❌ 错误: 登录后无法获取到身份认证的 Authorization Token！"
             print(msg)
             page.screenshot(path="error_token.png")
             send_telegram_notification(msg, "error_token.png")
             browser.close()
             return
 
-        print("成功获取 Authorization Token，准备请求服务器列表...")
+        print("成功获取 Authorization Token，直接请求服务器列表 API...")
 
-        # 构造统一的请求头，模拟你发出的真实抓包参数
+        # 构造统一的请求头
         api_headers = {
             "accept": "*/*",
             "authorization": jwt_token,
-            "content-type": application/json,
+            "content-type": "application/json",
             "origin": "https://www.pella.app",
             "referer": "https://www.pella.app/"
         }
 
-        # 使用带有合规请求头的 context.request 请求 API
+        # 直接请求服务器列表
         response = context.request.get("https://api.pella.app/user/servers", headers=api_headers)
         
         if response.status != 200:
@@ -183,17 +189,14 @@ def run():
                 print("🔄 服务器未在运行，正在发送启动指令...")
                 start_res = context.request.post(
                     "https://api.pella.app/server/start",
-                    data=json.dumps({"id": server_id}), # 严格打包为 JSON 字符串
+                    data=json.dumps({"id": server_id}), 
                     headers=api_headers
                 )
                 print(f"启动指令返回状态码: {start_res.status}")
                 page.wait_for_timeout(3000)
 
-        # 最终再次访问 API 检查结果并截图
+        # 最终再次访问 API 检查结果并截图汇报
         print("正在获取最终服务器状态以进行汇报...")
-        page.goto("https://www.pella.app/dashboard") 
-        page.wait_for_timeout(5000)
-        
         final_res = context.request.get("https://api.pella.app/user/servers", headers=api_headers)
         final_status_text = "未知"
         final_expiry_text = "未知"
@@ -205,7 +208,7 @@ def run():
             except Exception:
                 pass
 
-        # 截取最终状态图
+        # 截取最终状态图（直接截当前页面即可，或者不 care 样式直接结束）
         screenshot_name = "final_status.png"
         page.screenshot(path=screenshot_name, full_page=True)
 
