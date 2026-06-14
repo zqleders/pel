@@ -26,9 +26,9 @@ jobs:
         # 安装 Playwright 浏览器内核及其系统依赖
         playwright install chromium --with-deps
 
-          - name: 启用 WARP 网络
-        uses: fscarmen/warp-on-actions@v1.3
-        with:
+    - name: 启用 WARP 网络
+      uses: fscarmen/warp-on-actions@v1.3
+      with:
           stack: dual
           mode: client
 
