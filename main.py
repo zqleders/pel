@@ -6,11 +6,19 @@ from datetime import datetime, timedelta
 import requests
 from playwright.sync_api import sync_playwright
 
+# ================= 配置开关 =================
+ENABLE_SCREENSHOT = False  # 截图功能开关：True 开启，False 关闭
+# ============================================
+
 # 从 GitHub Secrets / 环境变量中获取配置
 EMAIL = os.getenv("PELLA_EMAIL")
 PASSWORD = os.getenv("PELLA_PASSWORD")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+
+def format_to_pella_time(dt_obj):
+    """将 datetime 对象统一格式化为 '时:分:秒 日/月/年' 格式"""
+    return dt_obj.strftime("%H:%M:%S %d/%m/%Y")
 
 def send_telegram_notification(message, screenshot_path=None):
     """发送文字消息和截图到 Telegram"""
@@ -25,8 +33,8 @@ def send_telegram_notification(message, screenshot_path=None):
     except Exception as e:
         print(f"发送 TG 文字通知失败: {e}")
 
-    # 发送图片
-    if screenshot_path and os.path.exists(screenshot_path):
+    # 发送图片（仅在开关开启且文件存在时发送）
+    if ENABLE_SCREENSHOT and screenshot_path and os.path.exists(screenshot_path):
         photo_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
         try:
             with open(screenshot_path, 'rb') as photo:
@@ -52,7 +60,7 @@ def run():
         # 定义一个变量用来监听并捕获带有 Bearer Token 的请求
         jwt_token = None
 
-        # 监听所有发出的网络请求，只要发现有请求头带了 Bearer 且不是空，就立刻截获它
+        # 监听所有发出的网络请求
         def handle_request(request):
             nonlocal jwt_token
             auth_header = request.headers.get("authorization")
@@ -74,10 +82,8 @@ def run():
         print("点击登录按钮...")
         page.click('button[data-localization-key="formButtonPrimary"]')
         
-        # 【核心改动】：完全不看页面跳转，直接等带有 Clerk 认证或 API 特征的网络请求发出
         print("正在等待网络身份令牌(Token)生成...")
         try:
-            # 只要有任何向 cl_ 或 pella.app 发出的带 auth 的请求即可触发，最多等 15 秒
             page.wait_for_event(
                 "request", 
                 lambda req: req.headers.get("authorization") is not None and "Bearer" in req.headers.get("authorization"), 
@@ -99,8 +105,10 @@ def run():
         if not jwt_token:
             msg = "❌ 错误: 登录后无法获取到身份认证的 Authorization Token！"
             print(msg)
-            page.screenshot(path="error_token.png")
-            send_telegram_notification(msg, "error_token.png")
+            screenshot_name = "error_token.png" if ENABLE_SCREENSHOT else None
+            if ENABLE_SCREENSHOT:
+                page.screenshot(path=screenshot_name)
+            send_telegram_notification(msg, screenshot_name)
             browser.close()
             return
 
@@ -121,8 +129,10 @@ def run():
         if response.status != 200:
             msg = f"❌ 获取服务器列表失败，API状态码: {response.status}"
             print(msg)
-            page.screenshot(path="error_login.png")
-            send_telegram_notification(msg, "error_login.png")
+            screenshot_name = "error_login.png" if ENABLE_SCREENSHOT else None
+            if ENABLE_SCREENSHOT:
+                page.screenshot(path=screenshot_name)
+            send_telegram_notification(msg, screenshot_name)
             browser.close()
             return
 
@@ -130,8 +140,11 @@ def run():
             data = response.json()
         except Exception:
             msg = "❌ 解析服务器列表 JSON 失败"
-            page.screenshot(path="error_json.png")
-            send_telegram_notification(msg, "error_json.png")
+            print(msg)
+            screenshot_name = "error_json.png" if ENABLE_SCREENSHOT else None
+            if ENABLE_SCREENSHOT:
+                page.screenshot(path=screenshot_name)
+            send_telegram_notification(msg, screenshot_name)
             browser.close()
             return
 
@@ -195,7 +208,7 @@ def run():
                 print(f"启动指令返回状态码: {start_res.status}")
                 page.wait_for_timeout(3000)
 
-        # 最终再次访问 API 检查结果并截图汇报
+        # 最终再次访问 API 检查结果并汇报
         print("正在获取最终服务器状态以进行汇报...")
         final_res = context.request.get("https://api.pella.app/user/servers", headers=api_headers)
         final_status_text = "未知"
@@ -208,9 +221,13 @@ def run():
             except Exception:
                 pass
 
-        # 截取最终状态图（直接截当前页面即可，或者不 care 样式直接结束）
-        screenshot_name = "final_status.png"
-        page.screenshot(path=screenshot_name, full_page=True)
+        # 根据全局开关决定是否截取最终状态图
+        screenshot_name = "final_status.png" if ENABLE_SCREENSHOT else None
+        if ENABLE_SCREENSHOT:
+            page.screenshot(path=screenshot_name, full_page=True)
+
+        # 格式化当前执行时间，保证和到期时间的“时:分:秒 日/月/年”格式完全一致
+        current_time_str = format_to_pella_time(datetime.now())
 
         # 组合通知消息
         report_message = (
@@ -219,7 +236,7 @@ def run():
             f"ℹ️ 续期动作: {renew_msg}\n"
             f"🔄 最终运行状态: {final_status_text}\n"
             f"📅 最终到期时间: {final_expiry_text}\n"
-            f"⏱️ 检查执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"⏱️ 检查执行时间: {current_time_str}"
         )
         
         print("发送最终报告到 Telegram...")
