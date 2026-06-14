@@ -36,41 +36,81 @@ def send_telegram_notification(message, screenshot_path=None):
 
 def parse_expiry(expiry_str):
     """解析到期时间字符串，格式: '21:23:30 14/06/2026'"""
-    # 格式为: 时:分:秒 日/月/年
     return datetime.strptime(expiry_str, "%H:%M:%S %d/%m/%Y")
 
 def run():
     if not EMAIL or not PASSWORD:
-        print("错误: 未配置账号或密码环境变。")
+        print("错误: 未配置账号或密码环境变量。")
         sys.exit(1)
 
     with sync_playwright() as p:
         # 启动无头浏览器
         browser = p.chromium.launch(headless=True)
-        # 设置窗口大小以确保截图清晰
         context = browser.new_context(viewport={"width": 1280, "height": 800})
         page = context.new_page()
+
+        # 定义一个变量用来监听并捕获带有 Bearer Token 的请求
+        jwt_token = None
+
+        # 监听所有发出的网络请求，只要发现有请求头带了 Bearer 且不是空，就立刻截获它
+        def handle_request(request):
+            nonlocal jwt_token
+            auth_header = request.headers.get("authorization")
+            if auth_header and auth_header.startswith("Bearer ") and len(auth_header) > 20:
+                # 排除可能存在的、还未初始化完全的旧 token
+                jwt_token = auth_header
+
+        page.on("request", handle_request)
 
         print("正在打开登录页面...")
         page.goto("https://www.pella.app/login")
         
-        # 等待输入框加载
+        # 等待输入框加载并填入
         page.wait_for_selector("#identifier-field")
         page.fill("#identifier-field", EMAIL)
         
         page.wait_for_selector("#password-field")
         page.fill("#password-field", PASSWORD)
         
-        # 使用更具鲁棒性的属性选择器点击 Continue 按钮
         print("点击登录按钮...")
         page.click('button[data-localization-key="formButtonPrimary"]')
         
-        # 等待页面跳转或登录完成后，确保 Cookie 已写入
+        # 登录后通常会跳转到仪表盘（dashboard），我们等待页面加载，同时给网络请求一点时间触发
+        print("等待登录完成及跳转...")
+        page.wait_for_url("**/dashboard", timeout=20000)
         page.wait_for_timeout(5000) 
 
-        print("正在请求服务器列表 API...")
-        # 直接使用 page.request 可以共享当前的登录状态(Cookie/Tokens)
-        response = page.request.get("https://api.pella.app/user/servers")
+        # 如果通过网络监听没拿到 Token，尝试通过 Clerk 前端对象的 JS 接口直接提取
+        if not jwt_token:
+            print("尝试通过前端 JS 提取 Clerk Token...")
+            try:
+                jwt_token = page.evaluate("window.Clerk?.session?.getToken()")
+                if jwt_token and not jwt_token.startswith("Bearer "):
+                    jwt_token = f"Bearer {jwt_token}"
+            except Exception as e:
+                print(f"JS 提取 Token 失败: {e}")
+
+        if not jwt_token:
+            msg = "❌ 错误: 登录成功但无法获取到身份认证的 Authorization Token！"
+            print(msg)
+            page.screenshot(path="error_token.png")
+            send_telegram_notification(msg, "error_token.png")
+            browser.close()
+            return
+
+        print("成功获取 Authorization Token，准备请求服务器列表...")
+
+        # 构造统一的请求头，模拟你发出的真实抓包参数
+        api_headers = {
+            "accept": "*/*",
+            "authorization": jwt_token,
+            "content-type": application/json,
+            "origin": "https://www.pella.app",
+            "referer": "https://www.pella.app/"
+        }
+
+        # 使用带有合规请求头的 context.request 请求 API
+        response = context.request.get("https://api.pella.app/user/servers", headers=api_headers)
         
         if response.status != 200:
             msg = f"❌ 获取服务器列表失败，API状态码: {response.status}"
@@ -106,7 +146,7 @@ def run():
 
         # 计算剩余时间
         expiry_time = parse_expiry(expiry_str)
-        now = datetime.utcnow() # API 通常返回 UTC 时间，根据实际情况可调整
+        now = datetime.utcnow() 
         time_left = expiry_time - now
 
         print(f"距离到期还剩: {time_left}")
@@ -118,7 +158,6 @@ def run():
         if time_left <= timedelta(hours=2):
             print("⚠️ 服务器即将到期（小于2小时），准备寻找可用的 Renew 链接...")
             
-            # 寻找 claimed 为 False 的链接
             target_link = None
             for r_link in renew_links:
                 if not r_link.get("claimed"):
@@ -127,9 +166,8 @@ def run():
             
             if target_link:
                 print(f"🔗 发现可用续期链接，正在访问: {target_link}")
-                # 页面跳转去访问续期链接
                 page.goto(target_link)
-                page.wait_for_timeout(5000) # 等待5秒让页面完成续期加载
+                page.wait_for_timeout(5000) 
                 renewed = True
                 renew_msg = "⏰ 触发了续期操作。"
             else:
@@ -139,25 +177,24 @@ def run():
             renew_msg = "✅ 服务器时间充足，无需续期。"
             print(renew_msg)
 
-        # 如果进行了续期，或者服务器当前本身就不是 running 状态，检查并尝试启动
-        # 根据需求：RENEW完成后，如果 status 不是 running 则去启动
+        # RENEW完成后，如果 status 不是 running 则去启动
         if (renewed or status != "running"):
-            # 如果刚刚续期了，重新检查一次状态（或者直接盲发 start 请求）
             if status != "running":
                 print("🔄 服务器未在运行，正在发送启动指令...")
-                start_res = page.request.post(
+                start_res = context.request.post(
                     "https://api.pella.app/server/start",
-                    data={"id": server_id}
+                    data=json.dumps({"id": server_id}), # 严格打包为 JSON 字符串
+                    headers=api_headers
                 )
                 print(f"启动指令返回状态码: {start_res.status}")
                 page.wait_for_timeout(3000)
 
         # 最终再次访问 API 检查结果并截图
         print("正在获取最终服务器状态以进行汇报...")
-        page.goto("https://www.pella.app/dashboard") # 或者去到面板首页以便截图
+        page.goto("https://www.pella.app/dashboard") 
         page.wait_for_timeout(5000)
         
-        final_res = page.request.get("https://api.pella.app/user/servers")
+        final_res = context.request.get("https://api.pella.app/user/servers", headers=api_headers)
         final_status_text = "未知"
         final_expiry_text = "未知"
         if final_res.status == 200:
