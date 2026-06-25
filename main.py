@@ -178,10 +178,33 @@ def run():
             print("⚠️ 服务器即将到期（小于2小时），准备寻找可用的 Renew 链接...")
             
             target_link = None
+            # 尝试查找可用的链接
             for r_link in renew_links:
                 if not r_link.get("claimed"):
                     target_link = r_link.get("link")
                     break
+            
+            # 【新增延迟重试机制】：如果没找到可用链接，多等一会儿再重新请求几次 API 刷新数据
+            retry_count = 0
+            while not target_link and retry_count < 3:
+                retry_count += 1
+                print(f"⏳ 未找到未使用的链接，可能API尚未刷新。等待 5 秒后进行第 {retry_count} 次重试...")
+                page.wait_for_timeout(5000)
+                
+                # 重新请求服务器列表 API
+                retry_res = context.request.get("https://api.pella.app/user/servers", headers=api_headers)
+                if retry_res.status == 200:
+                    try:
+                        retry_data = retry_res.json()
+                        server = retry_data.get("servers", [])[0]
+                        renew_links = server.get("renew_links", [])
+                        # 重新寻找
+                        for r_link in renew_links:
+                            if not r_link.get("claimed"):
+                                target_link = r_link.get("link")
+                                break
+                    except Exception:
+                        print("重试请求解析 JSON 失败。")
             
             if target_link:
                 print(f"🔗 发现可用续期链接，正在访问: {target_link}")
