@@ -7,7 +7,7 @@ import requests
 from playwright.sync_api import sync_playwright
 
 # ================= 配置开关 =================
-ENABLE_SCREENSHOT = False  # 截图功能开关：True 开启，False 关闭
+ENABLE_SCREENSHOT = True  # 截图功能开关：True 开启，False 关闭
 # ============================================
 
 # 从 GitHub Secrets / 环境变量中获取配置
