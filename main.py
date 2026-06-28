@@ -112,7 +112,19 @@ def run():
             browser.close()
             return
 
-        print("成功获取 Authorization Token，直接请求服务器列表 API...")
+        # =================【新增优化核心部分】=================
+        # 登录成功且拿到 Token 后，先访问服务器详情页以触发前端刷新机制
+        print("正在模拟访问服务器详情页以刷新后端数据...")
+        try:
+            page.goto("https://www.pella.app/server/435d9a0ea37c4571a1d57cdc9985b84e")
+            # 等待 5 秒，给前端脚本和潜在的刷新 API 留出充足的执行时间
+            page.wait_for_timeout(5000)
+            print("服务器详情页加载完成。")
+        except Exception as e:
+            print(f"访问详情页时出现非致命异常（继续执行API获取）: {e}")
+        # =======================================================
+
+        print("开始请求服务器列表 API...")
 
         # 构造统一的请求头
         api_headers = {
@@ -184,7 +196,7 @@ def run():
                     target_link = r_link.get("link")
                     break
             
-            # 【新增延迟重试机制】：如果没找到可用链接，多等一会儿再重新请求几次 API 刷新数据
+            # 延迟重试机制
             retry_count = 0
             while not target_link and retry_count < 3:
                 retry_count += 1
@@ -249,7 +261,7 @@ def run():
         if ENABLE_SCREENSHOT:
             page.screenshot(path=screenshot_name, full_page=True)
 
-        # 格式化当前执行时间，保证和到期时间的“时:分:秒 日/月/年”格式完全一致
+        # 格式化当前执行时间
         current_time_str = format_to_pella_time(datetime.now())
 
         # 组合通知消息
