@@ -116,7 +116,7 @@ def run():
         # 登录成功且拿到 Token 后，先访问服务器详情页以触发前端刷新机制
         print("正在模拟访问服务器详情页以刷新后端数据...")
         try:
-            page.goto("https://www.pella.app/server/3353893ab8754df28ae4c94d78b82cfd")
+            page.goto("https://www.pella.app/server/c40ff7d0a4e24d889ef7c6f7cfd2a6de")
             # 等待 5 秒，给前端脚本和潜在的刷新 API 留出充足的执行时间
             page.wait_for_timeout(5000)
             print("服务器详情页加载完成。")
