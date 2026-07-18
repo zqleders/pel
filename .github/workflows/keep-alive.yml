@@ -1,0 +1,25 @@
+name: Keep Alive
+
+on:
+  schedule:
+    # 每月 1 号的凌晨 0 点运行一次，这足以维持活跃度
+    - cron: '0 6 7 * *'
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update timestamp
+        run: |
+          date > last_updated.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_updated.txt
+          git commit -m "chore: keep alive - $(date)"
+          git push
