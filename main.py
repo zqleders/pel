@@ -251,14 +251,18 @@ def run():
                 if "server/435d9a0ea37c4571a1d57cdc9985b84e" not in page.url:
                     page.goto("https://www.pella.app/server/435d9a0ea37c4571a1d57cdc9985b84e")
                 
-                # 【防护增强】等待页面网络加载沉淀 + 预留 6 秒充分等待前端组件全部渲染完毕
-                print("⏳ 正在等待前端页面渲染与数据组件就绪...")
+                # 精准判定页面彻底加载完成：等待文本元素 "Links update every 24 hours" 渲染显示
+                print("⏳ 正在等待关键元素 'Links update every 24 hours' 渲染完成...")
                 try:
-                    page.wait_for_load_state("networkidle", timeout=10000)
-                except Exception:
-                    pass
-                page.wait_for_timeout(6000)
-                
+                    page.wait_for_selector(
+                        'span:has-text("Links update every 24 hours")', 
+                        state="visible", 
+                        timeout=15000
+                    )
+                    print("✅ 确认页面底部续期提示文本已完全渲染，页面整体加载完毕。")
+                except Exception as wait_e:
+                    print(f"⚠️ 等待标志元素超时或未找到 ({wait_e})，继续尝试寻找 RESTART 按钮...")
+
                 restart_btn = page.locator("button", has_text="RESTART")
                 btn_count = restart_btn.count()
                 print(f"[诊断] 匹配到的 RESTART 按钮数量: {btn_count}")
