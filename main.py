@@ -8,7 +8,7 @@ import requests
 from playwright.sync_api import sync_playwright
 
 # ================= 配置开关 =================
-ENABLE_SCREENSHOT = False  # 截图功能开关：True 开启，False 关闭
+ENABLE_SCREENSHOT = False  # 截图功能开关：True 开启（包含状态图和点击诊断图），False 关闭
 # ============================================
 
 # 从 GitHub Secrets / 环境变量中获取配置
@@ -181,7 +181,7 @@ def run():
         expiry_str = server.get("expiry")
         renew_links = server.get("renew_links", [])
 
-        # 【核心改进】：根据 API 动态获取到的最新 server_id 拼接详情页 URL，避免写死 UUID 导致失效！
+        # 根据 API 动态获取到的最新 server_id 拼接详情页 URL
         target_server_url = f"https://www.pella.app/server/{server_id}"
 
         print(f"服务器 ID: {server_id}, 当前状态: {status}, 到期时间: {expiry_str}")
@@ -332,18 +332,24 @@ def run():
                             page.mouse.click(cx, cy)
                             restart_btn.dispatch_event("click")
                             
-                            # 点击后等待 5 秒展示响应结果并截图
-                            print("⏳ 已触发点击，等待 5 秒以让页面响应并捕捉点击后的真实状态...")
+                            # 点击后等待 5 秒展示响应结果
+                            print("⏳ 已触发点击，等待 5 秒以让页面响应...")
                             page.wait_for_timeout(5000)
 
-                            debug_screenshot = "restart_debug_click.png"
-                            page.screenshot(path=debug_screenshot)
-                            send_telegram_notification(
-                                f"🔍 【RESTART 点击诊断】\n按钮坐标: ({cx:.1f}, {cy:.1f})\n包围盒: W={box['width']}, H={box['height']}\n页面已完全加载，红点标记已生成，诊断截图已捕捉。",
-                                debug_screenshot
-                            )
+                            # 【受 ENABLE_SCREENSHOT 控制】：诊断截图与通知逻辑
+                            debug_screenshot = "restart_debug_click.png" if ENABLE_SCREENSHOT else None
+                            if ENABLE_SCREENSHOT:
+                                page.screenshot(path=debug_screenshot)
+                                send_telegram_notification(
+                                    f"🔍 【RESTART 点击诊断】\n按钮坐标: ({cx:.1f}, {cy:.1f})\n包围盒: W={box['width']}, H={box['height']}\n页面已完全加载，红点标记已生成，诊断截图已捕捉。",
+                                    debug_screenshot
+                                )
+                            else:
+                                send_telegram_notification(
+                                    f"🔍 【RESTART 点击诊断】\n按钮坐标: ({cx:.1f}, {cy:.1f})\n包围盒: W={box['width']}, H={box['height']}\n页面已完全加载，成功触发点击（截图已根据配置停用）。"
+                                )
 
-                            print("已通过物理鼠标轨迹成功点击 RESTART 按钮，诊断截图已推送到 TG。")
+                            print("已通过物理鼠标轨迹成功点击 RESTART 按钮。")
                             restart_msg = f"⚠️ 站点非 502 状态，页面已完全加载，成功定位按钮并执行移动点击（点击坐标: X={cx:.1f}, Y={cy:.1f}）。"
                         else:
                             print("❌ [诊断] RESTART 按钮存在但未能获取包围盒坐标。")
