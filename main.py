@@ -250,7 +250,14 @@ def run():
                 # 确保当前回到详情页
                 if "server/435d9a0ea37c4571a1d57cdc9985b84e" not in page.url:
                     page.goto("https://www.pella.app/server/435d9a0ea37c4571a1d57cdc9985b84e")
-                    page.wait_for_timeout(3000)
+                
+                # 【防护增强】等待页面网络加载沉淀 + 预留 6 秒充分等待前端组件全部渲染完毕
+                print("⏳ 正在等待前端页面渲染与数据组件就绪...")
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(6000)
                 
                 restart_btn = page.locator("button", has_text="RESTART")
                 btn_count = restart_btn.count()
@@ -259,6 +266,11 @@ def run():
                 if btn_count > 0:
                     restart_btn = restart_btn.first
                     restart_btn.wait_for(state="visible", timeout=10000)
+                    
+                    # 确保按钮被滚动进可视区域，防止被遮挡或偏移
+                    restart_btn.scroll_into_view_if_needed()
+                    page.wait_for_timeout(1000)
+                    
                     box = restart_btn.bounding_box()
                     
                     if box:
