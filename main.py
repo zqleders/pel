@@ -133,7 +133,7 @@ def run():
             return
 
         # 登录成功且拿到 Token 后，同步确保浏览器跳转到服务器详情页
-        target_server_url = "https://www.pella.app/server/435d9a0ea37c4571a1d57cdc9985b84e"
+        target_server_url = "https://www.pella.app/server/c40ff7d0a4e24d889ef7c6f7cfd2a6de"
         ensure_navigate_to_server_page(page, target_server_url)
 
         print("开始请求服务器列表 API...")
