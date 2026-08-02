@@ -251,87 +251,99 @@ def run():
                 if "server/435d9a0ea37c4571a1d57cdc9985b84e" not in page.url:
                     page.goto("https://www.pella.app/server/435d9a0ea37c4571a1d57cdc9985b84e")
                 
-                # 精准判定页面彻底加载完成：等待文本元素 "Links update every 24 hours" 渲染显示
-                print("⏳ 正在等待关键元素 'Links update every 24 hours' 渲染完成...")
+                print("⏳ 正在等待详情页关键数据组件 'Links update every 24 hours' 加载渲染...")
+                
+                # 定义标志位，确定元素是否真正找到并可见
+                is_fully_loaded = False
+                
+                # 严密匹配：直接匹配包含该特定文本的节点
+                loaded_indicator = page.locator('*', has_text="Links update every 24 hours")
+                
                 try:
-                    page.wait_for_selector(
-                        'span:has-text("Links update every 24 hours")', 
-                        state="visible", 
-                        timeout=15000
-                    )
-                    print("✅ 确认页面底部续期提示文本已完全渲染，页面整体加载完毕。")
+                    loaded_indicator.first.wait_for(state="visible", timeout=25000)
+                    is_fully_loaded = True
+                    print("✅ 确认页面动态数据（包含 Links update 提示文本）已成功加载并完全渲染！")
                 except Exception as wait_e:
-                    print(f"⚠️ 等待标志元素超时或未找到 ({wait_e})，继续尝试寻找 RESTART 按钮...")
+                    print(f"❌ 错误: 等待 25 秒后未找到 'Links update every 24 hours' 文本元素，页面未完成数据加载。")
 
-                restart_btn = page.locator("button", has_text="RESTART")
-                btn_count = restart_btn.count()
-                print(f"[诊断] 匹配到的 RESTART 按钮数量: {btn_count}")
-
-                if btn_count > 0:
-                    restart_btn = restart_btn.first
-                    restart_btn.wait_for(state="visible", timeout=10000)
-                    
-                    # 确保按钮被滚动进可视区域，防止被遮挡或偏移
-                    restart_btn.scroll_into_view_if_needed()
-                    page.wait_for_timeout(1000)
-                    
-                    box = restart_btn.bounding_box()
-                    
-                    if box:
-                        cx = box['x'] + box['width'] / 2
-                        cy = box['y'] + box['height'] / 2
-                        print(f"[诊断] 成功找到 RESTART 按钮，Bounding Box: {box}")
-                        print(f"[诊断] 计算出的点击中心坐标为: X={cx}, Y={cy}")
-                        
-                        # 在页面上绘制红点标示点击位置，方便截图观察
-                        page.evaluate("""
-                            ({x, y}) => {
-                                const dot = document.createElement('div');
-                                dot.id = 'debug-click-marker';
-                                dot.style.position = 'fixed';
-                                dot.style.left = (x - 6) + 'px';
-                                dot.style.top = (y - 6) + 'px';
-                                dot.style.width = '12px';
-                                dot.style.height = '12px';
-                                dot.style.backgroundColor = 'red';
-                                dot.style.borderRadius = '50%';
-                                dot.style.border = '2px solid white';
-                                dot.style.boxShadow = '0 0 8px rgba(255,0,0,0.8)';
-                                dot.style.zIndex = '999999';
-                                document.body.appendChild(dot);
-                            }
-                        """, {"x": cx, "y": cy})
-                        
-                        print("[诊断] 正在执行鼠标起点模拟 (960, 100)...")
-                        page.mouse.move(960, 100)
-                        time.sleep(random.uniform(0.3, 0.6))
-                        
-                        print(f"[诊断] 正在移动鼠标至点击坐标 (X={cx}, Y={cy})...")
-                        page.mouse.move(cx, cy)
-                        time.sleep(random.uniform(0.5, 1.2))
-                        
-                        print("[诊断] 正在触发物理点击及 click 事件...")
-                        page.mouse.click(cx, cy)
-                        restart_btn.dispatch_event("click")
-                        
-                        # 针对诊断需求：截图并发送到 Telegram，展示红点位置
-                        debug_screenshot = "restart_debug_click.png"
-                        page.screenshot(path=debug_screenshot)
-                        send_telegram_notification(
-                            f"🔍 【RESTART 点击诊断】\n按钮坐标: ({cx:.1f}, {cy:.1f})\n包围盒: W={box['width']}, H={box['height']}\n红点标记已生成并在图中展示。",
-                            debug_screenshot
-                        )
-
-                        print("已通过物理鼠标轨迹成功点击 RESTART 按钮，诊断截图已推送到 TG。")
-                        restart_msg = f"⚠️ 站点非 502 状态，成功定位按钮并执行移动点击（点击坐标: X={cx:.1f}, Y={cy:.1f}）。"
-                    else:
-                        print("❌ [诊断] RESTART 按钮存在但未能获取包围盒坐标 (bounding_box 为 None，可能隐藏或离屏)。")
-                        restart_msg = "❌ 站点非 502 状态，找到了 RESTART 按钮但无法获取其屏幕坐标。"
+                # 【核心修改点】：如果没找到该元素，直接退出本段点击逻辑，打印提示，绝对不点击！
+                if not is_fully_loaded:
+                    restart_msg = "❌ 详情页未完全刷新渲染成功（未监听到 Links 提示文本），停止执行点击 RESTART。"
+                    print(restart_msg)
                 else:
-                    print("❌ [诊断] 页面上未找到任何包含 RESTART 文本的 button 元素！")
-                    restart_msg = "❌ 站点非 502 状态，页面上未找到 RESTART 按钮元素。"
+                    # 只有确认完全加载后，才去寻找和点击 RESTART 按钮
+                    restart_btn = page.locator("button", has_text="RESTART")
+                    btn_count = restart_btn.count()
+                    print(f"[诊断] 匹配到的 RESTART 按钮数量: {btn_count}")
 
-                page.wait_for_timeout(5000)
+                    if btn_count > 0:
+                        restart_btn = restart_btn.first
+                        restart_btn.wait_for(state="visible", timeout=10000)
+                        
+                        # 确保按钮被滚动进可视区域
+                        restart_btn.scroll_into_view_if_needed()
+                        page.wait_for_timeout(1500)
+                        
+                        box = restart_btn.bounding_box()
+                        
+                        if box:
+                            cx = box['x'] + box['width'] / 2
+                            cy = box['y'] + box['height'] / 2
+                            print(f"[诊断] 成功找到 RESTART 按钮，Bounding Box: {box}")
+                            print(f"[诊断] 计算出的点击中心坐标为: X={cx}, Y={cy}")
+                            
+                            # 在页面上绘制红点标示点击位置
+                            page.evaluate("""
+                                ({x, y}) => {
+                                    const dot = document.createElement('div');
+                                    dot.id = 'debug-click-marker';
+                                    dot.style.position = 'fixed';
+                                    dot.style.left = (x - 6) + 'px';
+                                    dot.style.top = (y - 6) + 'px';
+                                    dot.style.width = '12px';
+                                    dot.style.height = '12px';
+                                    dot.style.backgroundColor = 'red';
+                                    dot.style.borderRadius = '50%';
+                                    dot.style.border = '2px solid white';
+                                    dot.style.boxShadow = '0 0 8px rgba(255,0,0,0.8)';
+                                    dot.style.zIndex = '999999';
+                                    document.body.appendChild(dot);
+                                }
+                            """, {"x": cx, "y": cy})
+                            
+                            print("[诊断] 正在执行鼠标起点模拟 (960, 100)...")
+                            page.mouse.move(960, 100)
+                            time.sleep(random.uniform(0.3, 0.6))
+                            
+                            print(f"[诊断] 正在移动鼠标至点击坐标 (X={cx}, Y={cy})...")
+                            page.mouse.move(cx, cy)
+                            time.sleep(random.uniform(0.5, 1.2))
+                            
+                            print("[诊断] 正在触发物理点击及 click 事件...")
+                            page.mouse.click(cx, cy)
+                            restart_btn.dispatch_event("click")
+                            
+                            # 点击后等待 5 秒展示响应结果并截图
+                            print("⏳ 已触发点击，等待 5 秒以让页面响应并捕捉点击后的真实状态...")
+                            page.wait_for_timeout(5000)
+
+                            debug_screenshot = "restart_debug_click.png"
+                            page.screenshot(path=debug_screenshot)
+                            send_telegram_notification(
+                                f"🔍 【RESTART 点击诊断】\n按钮坐标: ({cx:.1f}, {cy:.1f})\n包围盒: W={box['width']}, H={box['height']}\n页面已完全加载，红点标记已生成，诊断截图已捕捉。",
+                                debug_screenshot
+                            )
+
+                            print("已通过物理鼠标轨迹成功点击 RESTART 按钮，诊断截图已推送到 TG。")
+                            restart_msg = f"⚠️ 站点非 502 状态，页面已完全加载，成功定位按钮并执行移动点击（点击坐标: X={cx:.1f}, Y={cy:.1f}）。"
+                        else:
+                            print("❌ [诊断] RESTART 按钮存在但未能获取包围盒坐标。")
+                            restart_msg = "❌ 站点非 502 状态，找到了 RESTART 按钮但无法获取其屏幕坐标。"
+                    else:
+                        print("❌ [诊断] 页面上未找到任何包含 RESTART 文本的 button 元素！")
+                        restart_msg = "❌ 站点非 502 状态，页面上未找到 RESTART 按钮元素。"
+
+                page.wait_for_timeout(3000)
             except Exception as e:
                 err_info = f"点击 RESTART 按钮时出错: {e}"
                 print(f"❌ [诊断] {err_info}")
