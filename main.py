@@ -47,6 +47,25 @@ def parse_expiry(expiry_str):
     """解析到期时间字符串，格式: '21:23:30 14/06/2026'"""
     return datetime.strptime(expiry_str, "%H:%M:%S %d/%m/%Y")
 
+def ensure_navigate_to_server_page(page, target_url):
+    """确保浏览器真正同步导航到了详情页"""
+    print(f"🌐 正在发起导航至详情页: {target_url}")
+    try:
+        page.goto(target_url, wait_until="domcontentloaded")
+        page.wait_for_url("**/server/**", timeout=10000)
+    except Exception as e:
+        print(f"⚠️ 第一次导航跳转未完全就绪 ({e})，正在检查当前 URL...")
+
+    current_url = page.url
+    print(f"[当前浏览器实际 URL]: {current_url}")
+
+    # 如果依然停留在登录页，说明鉴权路由还没完成，等待 3 秒后执行强制二次跳转
+    if "server" not in current_url:
+        print("⚠️ 浏览器未同步到详情页（仍留在登录/过渡页），等待 3 秒后强制二次跳转...")
+        page.wait_for_timeout(3000)
+        page.goto(target_url, wait_until="networkidle")
+        print(f"[二次强跳转后 URL]: {page.url}")
+
 def run():
     if not EMAIL or not PASSWORD:
         print("错误: 未配置账号或密码环境变量。")
@@ -113,15 +132,9 @@ def run():
             browser.close()
             return
 
-        # 登录成功且拿到 Token 后，先访问服务器详情页以触发前端刷新机制
-        print("正在模拟访问服务器详情页以刷新后端数据...")
-        try:
-            page.goto("https://www.pella.app/server/435d9a0ea37c4571a1d57cdc9985b84e")
-            # 等待 5 秒，给前端脚本和潜在的刷新 API 留出充足的执行时间
-            page.wait_for_timeout(5000)
-            print("服务器详情页加载完成。")
-        except Exception as e:
-            print(f"访问详情页时出现非致命异常（继续执行API获取）: {e}")
+        # 登录成功且拿到 Token 后，同步确保浏览器跳转到服务器详情页
+        target_server_url = "https://www.pella.app/server/435d9a0ea37c4571a1d57cdc9985b84e"
+        ensure_navigate_to_server_page(page, target_server_url)
 
         print("开始请求服务器列表 API...")
 
@@ -247,16 +260,12 @@ def run():
         if not is_502:
             print("⚠️ https://pella.doit.us.ci 状态非 '502 Bad Gateway'，正在尝试点击 RESTART 按钮...")
             try:
-                # 确保当前回到详情页
-                if "server/435d9a0ea37c4571a1d57cdc9985b84e" not in page.url:
-                    page.goto("https://www.pella.app/server/435d9a0ea37c4571a1d57cdc9985b84e")
+                # 严格校验并确保护送到详情页
+                ensure_navigate_to_server_page(page, target_server_url)
                 
                 print("⏳ 正在等待详情页关键数据组件 'Links update every 24 hours' 加载渲染...")
                 
-                # 定义标志位，确定元素是否真正找到并可见
                 is_fully_loaded = False
-                
-                # 严密匹配：直接匹配包含该特定文本的节点
                 loaded_indicator = page.locator('*', has_text="Links update every 24 hours")
                 
                 try:
@@ -264,11 +273,11 @@ def run():
                     is_fully_loaded = True
                     print("✅ 确认页面动态数据（包含 Links update 提示文本）已成功加载并完全渲染！")
                 except Exception as wait_e:
-                    print(f"❌ 错误: 等待 25 秒后未找到 'Links update every 24 hours' 文本元素，页面未完成数据加载。")
+                    print(f"❌ 错误: 等待 25 秒后未找到 'Links update every 24 hours' 文本元素。当前实际页面 URL: {page.url}")
 
-                # 【核心修改点】：如果没找到该元素，直接退出本段点击逻辑，打印提示，绝对不点击！
+                # 没成功渲染出元素，绝对不执行后续点击逻辑
                 if not is_fully_loaded:
-                    restart_msg = "❌ 详情页未完全刷新渲染成功（未监听到 Links 提示文本），停止执行点击 RESTART。"
+                    restart_msg = f"❌ 详情页未完全刷新渲染成功（未监听到 Links 提示文本，当前页面URL: {page.url}），停止执行点击 RESTART。"
                     print(restart_msg)
                 else:
                     # 只有确认完全加载后，才去寻找和点击 RESTART 按钮
