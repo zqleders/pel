@@ -1,0 +1,414 @@
+import os
+import sys
+import json
+import time
+import random
+from datetime import datetime, timedelta
+import requests
+from playwright.sync_api import sync_playwright
+
+# ================= 配置开关 =================
+ENABLE_SCREENSHOT = False  # 截图功能开关：True 开启，False 关闭
+# ============================================
+
+# 从 GitHub Secrets / 环境变量中获取配置
+EMAIL = os.getenv("PELLA_EMAIL")
+PASSWORD = os.getenv("PELLA_PASSWORD")
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+
+def format_to_pella_time(dt_obj):
+    """将 datetime 对象统一格式化为 '时:分:秒 日/月/年' 格式"""
+    return dt_obj.strftime("%H:%M:%S %d/%m/%Y")
+
+def send_telegram_notification(message, screenshot_path=None):
+    """发送文字消息和截图到 Telegram"""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        print("Telegram 配置缺失，跳过发送通知。")
+        return
+
+    # 发送文字
+    text_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+    try:
+        requests.post(text_url, json={"chat_id": TG_CHAT_ID, "text": message}, timeout=10)
+    except Exception as e:
+        print(f"发送 TG 文字通知失败: {e}")
+
+    # 发送图片（仅在路径有效且文件存在时发送）
+    if screenshot_path and os.path.exists(screenshot_path):
+        photo_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
+        try:
+            with open(screenshot_path, 'rb') as photo:
+                requests.post(photo_url, data={"chat_id": TG_CHAT_ID}, files={"photo": photo}, timeout=15)
+        except Exception as e:
+            print(f"发送 TG 图片通知失败: {e}")
+
+def parse_expiry(expiry_str):
+    """解析到期时间字符串，格式: '21:23:30 14/06/2026'"""
+    return datetime.strptime(expiry_str, "%H:%M:%S %d/%m/%Y")
+
+def ensure_navigate_to_server_page(page, target_url):
+    """确保浏览器真正同步导航到了详情页"""
+    print(f"🌐 正在发起导航至详情页: {target_url}")
+    try:
+        page.goto(target_url, wait_until="domcontentloaded")
+        page.wait_for_url("**/server/**", timeout=10000)
+    except Exception as e:
+        print(f"⚠️ 第一次导航跳转未完全就绪 ({e})，正在检查当前 URL...")
+
+    current_url = page.url
+    print(f"[当前浏览器实际 URL]: {current_url}")
+
+    # 如果依然停留在登录页，说明鉴权路由还没完成，等待 3 秒后执行强制二次跳转
+    if "server" not in current_url:
+        print("⚠️ 浏览器未同步到详情页（仍留在登录/过渡页），等待 3 秒后强制二次跳转...")
+        page.wait_for_timeout(3000)
+        page.goto(target_url, wait_until="networkidle")
+        print(f"[二次强跳转后 URL]: {page.url}")
+
+def run():
+    if not EMAIL or not PASSWORD:
+        print("错误: 未配置账号或密码环境变量。")
+        sys.exit(1)
+
+    with sync_playwright() as p:
+        # 启动无头浏览器
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(viewport={"width": 1280, "height": 800})
+        page = context.new_page()
+
+        # 定义一个变量用来监听并捕获带有 Bearer Token 的请求
+        jwt_token = None
+
+        # 监听所有发出的网络请求
+        def handle_request(request):
+            nonlocal jwt_token
+            auth_header = request.headers.get("authorization")
+            if auth_header and auth_header.startswith("Bearer ") and len(auth_header) > 20:
+                jwt_token = auth_header
+
+        page.on("request", handle_request)
+
+        print("正在打开登录页面...")
+        page.goto("https://www.pella.app/login")
+        
+        # 等待输入框加载并填入
+        page.wait_for_selector("#identifier-field")
+        page.fill("#identifier-field", EMAIL)
+        
+        page.wait_for_selector("#password-field")
+        page.fill("#password-field", PASSWORD)
+        
+        print("点击登录按钮...")
+        page.click('button[data-localization-key="formButtonPrimary"]')
+        
+        print("正在等待网络身份令牌(Token)生成...")
+        try:
+            page.wait_for_event(
+                "request", 
+                lambda req: req.headers.get("authorization") is not None and "Bearer" in req.headers.get("authorization"), 
+                timeout=15000
+            )
+        except Exception:
+            print("通过事件未精准截获到 Token，使用缓冲时间并尝试 JS 兜底提取...")
+            page.wait_for_timeout(5000)
+
+        # 兜底：如果事件没触发，直接通过前端全局对象提取
+        if not jwt_token:
+            try:
+                jwt_token = page.evaluate("window.Clerk?.session?.getToken()")
+                if jwt_token and not jwt_token.startswith("Bearer "):
+                    jwt_token = f"Bearer {jwt_token}"
+            except Exception:
+                pass
+
+        if not jwt_token:
+            msg = "❌ 错误: 登录后无法获取到身份认证的 Authorization Token！"
+            print(msg)
+            screenshot_name = "error_token.png" if ENABLE_SCREENSHOT else None
+            if ENABLE_SCREENSHOT:
+                page.screenshot(path=screenshot_name)
+            send_telegram_notification(msg, screenshot_name)
+            browser.close()
+            return
+
+        print("开始请求服务器列表 API...")
+
+        # 构造统一的请求头
+        api_headers = {
+            "accept": "*/*",
+            "authorization": jwt_token,
+            "content-type": "application/json",
+            "origin": "https://www.pella.app",
+            "referer": "https://www.pella.app/"
+        }
+
+        # 直接请求服务器列表
+        response = context.request.get("https://api.pella.app/user/servers", headers=api_headers)
+        
+        if response.status != 200:
+            msg = f"❌ 获取服务器列表失败，API状态码: {response.status}"
+            print(msg)
+            screenshot_name = "error_login.png" if ENABLE_SCREENSHOT else None
+            if ENABLE_SCREENSHOT:
+                page.screenshot(path=screenshot_name)
+            send_telegram_notification(msg, screenshot_name)
+            browser.close()
+            return
+
+        try:
+            data = response.json()
+        except Exception:
+            msg = "❌ 解析服务器列表 JSON 失败"
+            print(msg)
+            screenshot_name = "error_json.png" if ENABLE_SCREENSHOT else None
+            if ENABLE_SCREENSHOT:
+                page.screenshot(path=screenshot_name)
+            send_telegram_notification(msg, screenshot_name)
+            browser.close()
+            return
+
+        servers = data.get("servers", [])
+        if not servers:
+            print("没有找到任何服务器。")
+            browser.close()
+            return
+
+        # 针对第一个服务器进行操作
+        server = servers[0]
+        server_id = server.get("id")
+        status = server.get("status")
+        expiry_str = server.get("expiry")
+        renew_links = server.get("renew_links", [])
+
+        # 【核心改进】：根据 API 动态获取到的最新 server_id 拼接详情页 URL，避免写死 UUID 导致失效！
+        target_server_url = f"https://www.pella.app/server/{server_id}"
+
+        print(f"服务器 ID: {server_id}, 当前状态: {status}, 到期时间: {expiry_str}")
+        print(f"动态构建服务器详情页 URL: {target_server_url}")
+
+        # 计算剩余时间
+        expiry_time = parse_expiry(expiry_str)
+        now = datetime.utcnow() 
+        time_left = expiry_time - now
+
+        print(f"距离到期还剩: {time_left}")
+
+        renewed = False
+        renew_msg = ""
+
+        # 判断是否小于等于 2 小时
+        if time_left <= timedelta(hours=2):
+            print("⚠️ 服务器即将到期（小于2小时），准备寻找可用的 Renew 链接...")
+            
+            target_link = None
+            # 尝试查找可用的链接
+            for r_link in renew_links:
+                if not r_link.get("claimed"):
+                    target_link = r_link.get("link")
+                    break
+            
+            # 延迟重试机制
+            retry_count = 0
+            while not target_link and retry_count < 3:
+                retry_count += 1
+                print(f"⏳ 未找到未使用的链接，可能API尚未刷新。等待 5 秒后进行第 {retry_count} 次重试...")
+                page.wait_for_timeout(5000)
+                
+                # 重新请求服务器列表 API
+                retry_res = context.request.get("https://api.pella.app/user/servers", headers=api_headers)
+                if retry_res.status == 200:
+                    try:
+                        retry_data = retry_res.json()
+                        server = retry_data.get("servers", [])[0]
+                        renew_links = server.get("renew_links", [])
+                        # 重新寻找
+                        for r_link in renew_links:
+                            if not r_link.get("claimed"):
+                                target_link = r_link.get("link")
+                                break
+                    except Exception:
+                        print("重试请求解析 JSON 失败。")
+            
+            if target_link:
+                print(f"🔗 发现可用续期链接，正在访问: {target_link}")
+                page.goto(target_link)
+                page.wait_for_timeout(5000) 
+                renewed = True
+                renew_msg = "⏰ 触发了续期操作。"
+            else:
+                renew_msg = "❌ 警告: 服务器即将到期，但未找到未使用的 (claimed: false) 续期链接！"
+                print(renew_msg)
+        else:
+            renew_msg = "✅ 服务器时间充足，无需续期。"
+            print(renew_msg)
+
+        # 检查 https://pella.doit.us.ci 运行状态，精确判定 502 状态
+        print("正在检查 https://pella.doit.us.ci 运行状态...")
+        restart_msg = ""
+        is_502 = False
+        
+        try:
+            check_res = requests.get("https://pella.doit.us.ci", timeout=10)
+            if check_res.status_code == 502 or "502 Bad Gateway" in check_res.text:
+                is_502 = True
+        except requests.exceptions.RequestException as e:
+            err_msg = str(e)
+            if "502" in err_msg or "Bad Gateway" in err_msg:
+                is_502 = True
+
+        if not is_502:
+            print("⚠️ https://pella.doit.us.ci 状态非 '502 Bad Gateway'，正在尝试点击 RESTART 按钮...")
+            try:
+                # 导航至动态算出的详情页 URL
+                ensure_navigate_to_server_page(page, target_server_url)
+                
+                print("⏳ 正在等待详情页关键数据组件 'Links update every 24 hours' 加载渲染...")
+                
+                is_fully_loaded = False
+                loaded_indicator = page.locator('*', has_text="Links update every 24 hours")
+                
+                try:
+                    loaded_indicator.first.wait_for(state="visible", timeout=25000)
+                    is_fully_loaded = True
+                    print("✅ 确认页面动态数据（包含 Links update 提示文本）已成功加载并完全渲染！")
+                except Exception as wait_e:
+                    print(f"❌ 错误: 等待 25 秒后未找到 'Links update every 24 hours' 文本元素。当前实际页面 URL: {page.url}")
+
+                # 没成功渲染出元素，绝对不执行后续点击逻辑
+                if not is_fully_loaded:
+                    restart_msg = f"❌ 详情页未完全刷新渲染成功（未监听到 Links 提示文本，当前页面URL: {page.url}），停止执行点击 RESTART。"
+                    print(restart_msg)
+                else:
+                    # 只有确认完全加载后，才去寻找和点击 RESTART 按钮
+                    restart_btn = page.locator("button", has_text="RESTART")
+                    btn_count = restart_btn.count()
+                    print(f"[诊断] 匹配到的 RESTART 按钮数量: {btn_count}")
+
+                    if btn_count > 0:
+                        restart_btn = restart_btn.first
+                        restart_btn.wait_for(state="visible", timeout=10000)
+                        
+                        # 确保按钮被滚动进可视区域
+                        restart_btn.scroll_into_view_if_needed()
+                        page.wait_for_timeout(1500)
+                        
+                        box = restart_btn.bounding_box()
+                        
+                        if box:
+                            cx = box['x'] + box['width'] / 2
+                            cy = box['y'] + box['height'] / 2
+                            print(f"[诊断] 成功找到 RESTART 按钮，Bounding Box: {box}")
+                            print(f"[诊断] 计算出的点击中心坐标为: X={cx}, Y={cy}")
+                            
+                            # 在页面上绘制红点标示点击位置
+                            page.evaluate("""
+                                ({x, y}) => {
+                                    const dot = document.createElement('div');
+                                    dot.id = 'debug-click-marker';
+                                    dot.style.position = 'fixed';
+                                    dot.style.left = (x - 6) + 'px';
+                                    dot.style.top = (y - 6) + 'px';
+                                    dot.style.width = '12px';
+                                    dot.style.height = '12px';
+                                    dot.style.backgroundColor = 'red';
+                                    dot.style.borderRadius = '50%';
+                                    dot.style.border = '2px solid white';
+                                    dot.style.boxShadow = '0 0 8px rgba(255,0,0,0.8)';
+                                    dot.style.zIndex = '999999';
+                                    document.body.appendChild(dot);
+                                }
+                            """, {"x": cx, "y": cy})
+                            
+                            print("[诊断] 正在执行鼠标起点模拟 (960, 100)...")
+                            page.mouse.move(960, 100)
+                            time.sleep(random.uniform(0.3, 0.6))
+                            
+                            print(f"[诊断] 正在移动鼠标至点击坐标 (X={cx}, Y={cy})...")
+                            page.mouse.move(cx, cy)
+                            time.sleep(random.uniform(0.5, 1.2))
+                            
+                            print("[诊断] 正在触发物理点击及 click 事件...")
+                            page.mouse.click(cx, cy)
+                            restart_btn.dispatch_event("click")
+                            
+                            # 点击后等待 5 秒展示响应结果并截图
+                            print("⏳ 已触发点击，等待 5 秒以让页面响应并捕捉点击后的真实状态...")
+                            page.wait_for_timeout(5000)
+
+                            debug_screenshot = "restart_debug_click.png"
+                            page.screenshot(path=debug_screenshot)
+                            send_telegram_notification(
+                                f"🔍 【RESTART 点击诊断】\n按钮坐标: ({cx:.1f}, {cy:.1f})\n包围盒: W={box['width']}, H={box['height']}\n页面已完全加载，红点标记已生成，诊断截图已捕捉。",
+                                debug_screenshot
+                            )
+
+                            print("已通过物理鼠标轨迹成功点击 RESTART 按钮，诊断截图已推送到 TG。")
+                            restart_msg = f"⚠️ 站点非 502 状态，页面已完全加载，成功定位按钮并执行移动点击（点击坐标: X={cx:.1f}, Y={cy:.1f}）。"
+                        else:
+                            print("❌ [诊断] RESTART 按钮存在但未能获取包围盒坐标。")
+                            restart_msg = "❌ 站点非 502 状态，找到了 RESTART 按钮但无法获取其屏幕坐标。"
+                    else:
+                        print("❌ [诊断] 页面上未找到任何包含 RESTART 文本的 button 元素！")
+                        restart_msg = "❌ 站点非 502 状态，页面上未找到 RESTART 按钮元素。"
+
+                page.wait_for_timeout(3000)
+            except Exception as e:
+                err_info = f"点击 RESTART 按钮时出错: {e}"
+                print(f"❌ [诊断] {err_info}")
+                restart_msg = f"❌ 站点非 502 状态，但点击 RESTART 失败: {e}"
+        else:
+            print("✅ 服务返回 502 Bad Gateway，状态正常，无需点击 RESTART。")
+            restart_msg = "✅ 站点状态为 502 Bad Gateway，运行正常，无需重启。"
+
+        # RENEW完成后，如果 status 不是 running 则去启动
+        if (renewed or status != "running"):
+            if status != "running":
+                print("🔄 服务器未在运行，正在发送启动指令...")
+                start_res = context.request.post(
+                    "https://api.pella.app/server/start",
+                    data=json.dumps({"id": server_id}), 
+                    headers=api_headers
+                )
+                print(f"启动指令返回状态码: {start_res.status}")
+                page.wait_for_timeout(3000)
+
+        # 最终再次访问 API 检查结果并汇报
+        print("正在获取最终服务器状态以进行汇报...")
+        final_res = context.request.get("https://api.pella.app/user/servers", headers=api_headers)
+        final_status_text = "未知"
+        final_expiry_text = "未知"
+        if final_res.status == 200:
+            try:
+                final_server = final_res.json().get("servers", [])[0]
+                final_status_text = final_server.get("status")
+                final_expiry_text = final_server.get("expiry")
+            except Exception:
+                pass
+
+        # 根据全局开关决定是否截取最终状态图
+        screenshot_name = "final_status.png" if ENABLE_SCREENSHOT else None
+        if ENABLE_SCREENSHOT:
+            page.screenshot(path=screenshot_name, full_page=True)
+
+        # 格式化当前执行时间
+        current_time_str = format_to_pella_time(datetime.now())
+
+        # 组合通知消息
+        report_message = (
+            f"📊 【Pella 自动化运维报告】\n"
+            f"---------------------------\n"
+            f"ℹ️ 续期动作: {renew_msg}\n"
+            f"🛠️ 检查站点: {restart_msg}\n"
+            f"🔄 最终运行状态: {final_status_text}\n"
+            f"📅 最终到期时间: {final_expiry_text}\n"
+            f"⏱️ 检查执行时间: {current_time_str}"
+        )
+        
+        print("发送最终报告到 Telegram...")
+        send_telegram_notification(report_message, screenshot_name)
+
+        browser.close()
+
+if __name__ == "__main__":
+    run()
