@@ -147,7 +147,7 @@ def run():
         response = context.request.get("https://api.pella.app/user/servers", headers=api_headers)
         
         if response.status != 200:
-            msg = f"❌ 获取服务器列表失败，API状态码: {response.status}"
+            msg = f"❌ [Pella]获取服务器列表失败，API状态码: {response.status}"
             print(msg)
             screenshot_name = "error_login.png" if ENABLE_SCREENSHOT else None
             if ENABLE_SCREENSHOT:
@@ -159,7 +159,7 @@ def run():
         try:
             data = response.json()
         except Exception:
-            msg = "❌ 解析服务器列表 JSON 失败"
+            msg = "❌ [Pella]解析服务器列表 JSON 失败"
             print(msg)
             screenshot_name = "error_json.png" if ENABLE_SCREENSHOT else None
             if ENABLE_SCREENSHOT:
